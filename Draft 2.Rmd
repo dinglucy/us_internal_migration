@@ -1,0 +1,444 @@
+---
+title: "Draft 1"
+output: html_notebook
+---
+
+# Loading Packages
+
+```{r, warning = FALSE}
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(usmap)
+library(stargazer)
+library(haven)
+library(tigris)
+library(rio)
+library(standardize)
+library(effsize)
+library(ggthemes)
+```
+
+# Load and Clean Datasets
+
+```{r, warning = FALSE, message = FALSE}
+# Controls v2 from ACS
+controls_2019 <- read_csv("controls_2019_v2.csv") %>%
+  mutate(total_pop = SE_A00001_001) %>%
+  mutate(percent_white = SE_A03001_002/total_pop) %>%
+  mutate(percent_bachelors = SE_B12001_004/SE_B12001_001) %>%
+  mutate(med_household_income = SE_A14006_001) %>%
+  mutate(percent_hispanic = SE_B04001_010/total_pop) %>%
+  select(Geo_FIPS, Geo_NAME, Geo_STATE, Geo_COUNTY, total_pop, 
+         percent_white, percent_bachelors, med_household_income,
+         percent_hispanic) %>%
+  mutate(fips = as.numeric(Geo_FIPS))
+
+cbp_2018 <- read_csv("cbp_2018.csv") %>%
+  mutate(avg_wage = SE_T1200_001) %>%
+  mutate(fips = as.numeric(Geo_FIPS)) %>%
+  select(fips, avg_wage)
+
+controls_2019 <- left_join(controls_2019, cbp_2018, by = "fips")
+```
+
+```{r, warning = FALSE, message = FALSE}
+# Other Controls
+poverty <- read_excel("PovertyEstimates.xls") %>%
+  row_to_names(4) %>%
+  clean_names() %>%
+  mutate(fips = as.numeric(fip_stxt),
+         poverty = as.numeric(pctpovall_2019)/100) %>%
+  select(fips, poverty)
+
+unemployment <- read_excel("Unemployment.xlsx") %>%
+  row_to_names(4) %>%
+  clean_names() %>%
+  mutate(fips = as.numeric(fips_code),
+         unemp = as.numeric(unemployment_rate_2019)/100) %>%
+  select(fips, unemp)
+
+controls_2019 <- controls_2019 %>%
+  left_join(poverty, by = "fips") %>%
+  left_join(unemployment, by = "fips")
+```
+
+```{r, warning = FALSE, message = FALSE}
+# Import county migration data
+c2c1519 <- import_list("c2c1519.xlsx")
+c2c1216 <- import_list("c2c1216.xlsx")
+c2c0812 <- import_list("c2c0812.xls")
+
+# Rename columns
+for (i in 1:52){
+  colnames(c2c1519[[i]]) <- c("state_code_a", 
+                                          "fips_a", 
+                                          "state_code_b",
+                                          "fips_b",
+                                          "state_name_a",
+                                          "county_name_a",
+                                          "state_name_b",
+                                          "county_name_b",
+                                          "flow_ba",
+                                          "flow_ba_moe",
+                                          "flow_ab",
+                                          "flow_ab_moe",
+                                          "net_ba",
+                                          "net_ba_moe",
+                                          "gross_ab",
+                                          "gross_ab_moe")
+  colnames(c2c1216[[i]]) <- c("state_code_a", 
+                                          "fips_a", 
+                                          "state_code_b",
+                                          "fips_b",
+                                          "state_name_a",
+                                          "county_name_a",
+                                          "state_name_b",
+                                          "county_name_b",
+                                          "flow_ba",
+                                          "flow_ba_moe",
+                                          "flow_ab",
+                                          "flow_ab_moe",
+                                          "net_ba",
+                                          "net_ba_moe",
+                                          "gross_ab",
+                                          "gross_ab_moe")
+  colnames(c2c0812[[i]]) <- c("state_code_a", 
+                                          "fips_a", 
+                                          "state_code_b",
+                                          "fips_b",
+                                          "state_name_a",
+                                          "county_name_a",
+                                          "state_name_b",
+                                          "county_name_b",
+                                          "flow_ba",
+                                          "flow_ba_moe",
+                                          "flow_ab",
+                                          "flow_ab_moe",
+                                          "net_ba",
+                                          "net_ba_moe",
+                                          "gross_ab",
+                                          "gross_ab_moe")
+}
+
+# Delete extraneous rows
+for (i in 1:52){
+  c2c1519[[i]] <- c2c1519[[i]] %>%
+    filter(!row_number() %in% c(1, 2))
+  c2c1216[[i]] <- c2c1216[[i]] %>%
+    filter(!row_number() %in% c(1, 2))
+  c2c0812[[i]] <- c2c0812[[i]] %>%
+    filter(!row_number() %in% c(1, 2))
+}
+
+# Bind datasets together by year
+c2c1519 <- bind_rows(c2c1519)
+c2c1216 <- bind_rows(c2c1216)
+c2c0812 <- bind_rows(c2c0812)
+```
+
+
+```{r, warning = FALSE, message = FALSE}
+# Combine county migration data with controls and election data
+df_2020 <- c2c1519 %>%
+  filter(is.na(fips_b) == FALSE) %>%
+  mutate(comb_fips_a = paste0(state_code_a, fips_a)) %>%
+  group_by(county_name_a, comb_fips_a) %>%
+  summarize(flow_ba = sum(as.numeric(flow_ba))) %>%
+  arrange(comb_fips_a) %>%
+  mutate(fips = as.numeric(comb_fips_a))
+
+countypres2020 <- read_csv("countypres_2000-2020.csv") %>%
+  filter(year == 2020) %>%
+  filter(party == "DEMOCRAT" | party == "REPUBLICAN") %>%
+  group_by(county_fips) %>%
+  summarize(total_2p_votes = sum(candidatevotes)) %>%
+  mutate(fips = as.numeric(county_fips)) %>%
+  select(fips, total_2p_votes)
+
+countypres2020_2p <- read_csv("countypres_2000-2020.csv") %>%
+  filter(year == 2020) %>%
+  filter(party == "DEMOCRAT") %>%
+  mutate(fips = as.numeric(county_fips)) %>%
+  group_by(fips) %>%
+  summarize(candidatevotes = sum(candidatevotes)) %>%
+  left_join(countypres2020, by = "fips") %>%
+  mutate(dem_percent = candidatevotes/total_2p_votes)
+
+countypres2020_2p_rep <- read_csv("countypres_2000-2020.csv") %>%
+  filter(year == 2020) %>%
+  filter(party == "REPUBLICAN") %>%
+  mutate(fips = as.numeric(county_fips)) %>%
+  group_by(fips) %>%
+  summarize(candidatevotes = sum(candidatevotes)) %>%
+  left_join(countypres2020, by = "fips") %>%
+  mutate(rep_percent = candidatevotes/total_2p_votes) %>%
+  select(fips, rep_percent)
+  
+
+df_2020_election <- left_join(df_2020, countypres2020_2p, by = "fips")
+
+df_2020_combined <- left_join(df_2020_election, controls_2019, by = "fips") %>%
+  mutate(avg_immi_rate = flow_ba/total_pop)
+```
+
+
+
+```{r}
+df <- df_2020_combined %>%
+  filter(Geo_STATE != "02" && Geo_STATE != "72")
+```
+
+```{r}
+write.csv(df, "migration_df.csv")
+```
+
+
+```{r}
+countypres2020_2p %>%
+  filter(fips > 2000) %>%
+  filter(fips < 3000) %>%
+  group_by() %>%
+  summarize(candidate_votes = sum(candidatevotes), total_2p_votes = sum(total_2p_votes))
+```
+
+
+
+# Immigration
+
+```{r, warning = FALSE, message = FALSE}
+# Basic linear regression
+stargazer(lm(dem_percent ~ avg_immi_rate, data = df_2020_combined, weight = total_pop),
+          type = "text")
+```
+
+```{r, warning = FALSE, message = FALSE}
+# Visualization of relationship between immigration rate and dem percent
+ggplot(df_2020_combined, aes(x = avg_immi_rate, y = dem_percent, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Fall in Democratic Voting with Increase in Rate of Immigration",
+       x = "Immigration Rate",
+       y = "Two-Party Democratic Vote Share",
+       subtitle = "2020 Presidential Election",
+       caption = "Weighted by County Population")
+```
+
+Check for missing value in the economic data
+Check Alaska!!
+What are the patterns we expect to see if this is true, does the data look like what it would if this is happening
+Have a hypothesis that this should impact behavior, do you see a pattern that isn't explained by other things
+Matching
+Viriginia reports cities and counties around them differently and doesn't line up - drop ones that don't align cleanly (fips codes matched things are weird, census has the full county but the data is reported split between the city and everything else)
+Know things about the places that people are coming from, -1, 0, 1 net partisanship of the people moving into an area, sorting, impact on people there
+
+```{r, warning = FALSE, message = FALSE}
+# Regression with controls
+stargazer(lm(dem_percent ~ avg_immi_rate + percent_white + percent_hispanic +
+               percent_bachelors + avg_wage + poverty + unemp + med_household_income, data = df_2020_combined,
+             weight = total_pop),
+          lm(dem_percent ~ avg_immi_rate + percent_white + percent_hispanic +
+               percent_bachelors, data = df_2020_combined,
+             weight = total_pop),
+          lm(dem_percent ~ avg_immi_rate + avg_wage + poverty + unemp + med_household_income, data = df_2020_combined,
+             weight = total_pop),
+          type = "text")
+```
+
+
+```{r, warning = FALSE, message = FALSE}
+# Regression standardized
+df_2020_combined$dem_percent_scaled <- scale(df_2020_combined$dem_percent)[, 1]
+df_2020_combined$avg_immi_rate_scaled <- scale(df_2020_combined$avg_immi_rate)[, 1]
+df_2020_combined$percent_white_scaled <- scale(df_2020_combined$percent_white)[, 1]
+df_2020_combined$percent_bachelors_scaled <- scale(df_2020_combined$percent_bachelors)[, 1]
+df_2020_combined$med_household_income_scaled <- scale(df_2020_combined$med_household_income)[, 1]
+df_2020_combined$percent_hispanic_scaled <- scale(df_2020_combined$percent_hispanic)[, 1]
+df_2020_combined$avg_wage_scaled <- scale(df_2020_combined$avg_wage)[, 1]
+df_2020_combined$poverty_scaled <- scale(df_2020_combined$poverty)[, 1]
+df_2020_combined$unemp_scaled <- scale(df_2020_combined$unemp)[, 1]
+
+stargazer(lm(dem_percent_scaled ~ avg_immi_rate_scaled + percent_white_scaled + percent_bachelors_scaled + 
+               med_household_income_scaled + percent_hispanic_scaled +
+               avg_wage_scaled + poverty_scaled + unemp_scaled, data = df_2020_combined,
+          weight = total_pop), type = "text")
+```
+
+# Emigration
+
+```{r}
+df_2020_emi <- c2c1519 %>%
+  filter(is.na(fips_b) == FALSE) %>%
+  mutate(comb_fips_a = paste0(state_code_a, fips_a)) %>%
+  group_by(county_name_a, comb_fips_a) %>%
+  summarize(flow_ab = sum(as.numeric(flow_ab))) %>%
+  arrange(comb_fips_a) %>%
+  mutate(fips = as.numeric(comb_fips_a))
+
+df_2020_election_emi <- left_join(df_2020_emi, countypres2020_2p, by = "fips")
+
+df_2020_combined_emi <- left_join(df_2020_election_emi, controls_2019, by = "fips") %>%
+  mutate(avg_emi_rate = flow_ab/total_pop)
+```
+
+```{r}
+df_2020_combined_emi %>%
+  filter(Geo_STATE == "02") %>%
+  group_by() %>%
+  summarize(flow_ab = sum(flow_ab))
+```
+
+
+```{r}
+df_emi <- df_2020_combined_emi %>%
+  filter(Geo_STATE != "02") %>%
+  filter(Geo_STATE != "72")
+write.csv(df_emi, "migration_df2.csv")
+```
+
+
+```{r, warning = FALSE, message = FALSE}
+# Basic regression
+stargazer(lm(dem_percent ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop), type = "text")
+```
+
+```{r}
+ggplot(df_2020_combined_emi, aes(x = avg_emi_rate, y = dem_percent, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Fall in Democratic Voting with Increase in Rate of Emigration",
+       x = "Emigration Rate",
+       y = "Two-Party Democratic Vote Share",
+       subtitle = "2020 Presidential Election",
+       caption = "Weighted by County Population")
+```
+
+```{r, warning = FALSE, message = FALSE}
+stargazer(lm(dem_percent ~ avg_emi_rate + percent_white + percent_hispanic +
+               percent_bachelors + avg_wage + poverty + unemp + med_household_income, data = df_2020_combined_emi,
+             weight = total_pop), 
+          lm(dem_percent ~ avg_emi_rate + percent_white + percent_hispanic +
+               percent_bachelors, data = df_2020_combined_emi,
+             weight = total_pop),
+          lm(dem_percent ~ avg_emi_rate + avg_wage + poverty + unemp + med_household_income, data = df_2020_combined_emi,
+             weight = total_pop),
+          type = "text")
+```
+
+# Maps
+
+```{r}
+plot_usmap(data = df_2020_combined, values = "avg_immi_rate", size = .1) +
+  scale_fill_continuous(low = "white", "high" = "black") +
+  labs(title = "Internal Immigration Rates from 2015-2019")
+```
+
+```{r}
+plot_usmap(data = df_2020_combined_emi, values = "avg_emi_rate", size = .1) +
+  scale_fill_continuous(low = "white", "high" = "black") +
+  labs(title = "Internal Emigration Rates from 2015-2019")
+```
+
+# Regressing on Controls
+
+```{r}
+stargazer(lm(percent_white ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(percent_hispanic ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(percent_bachelors ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          type = "text")
+```
+
+```{r}
+stargazer(lm(percent_white ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(percent_hispanic ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(percent_bachelors ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          type = "text")
+```
+
+```{r}
+stargazer(lm(avg_wage ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(poverty ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(unemp ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          lm(med_household_income ~ avg_emi_rate, data = df_2020_combined_emi, weight = total_pop),
+          type = "text")
+```
+
+
+Thoughts - add cost of living interacting with avg_wage?
+
+```{r}
+stargazer(lm(avg_immi_rate ~ avg_wage, data = df_2020_combined, weight = total_pop),
+          lm(avg_immi_rate ~ poverty, data = df_2020_combined, weight = total_pop),
+          lm(avg_immi_rate ~ unemp, data = df_2020_combined, weight = total_pop),
+          lm(avg_immi_rate ~ med_household_income, data = df_2020_combined, weight = total_pop),
+          type = "text")
+```
+
+
+```{r}
+ggplot(df_2020_combined, aes(x = avg_immi_rate, y = percent_white, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Immigration Rate is Higher in Counties with Higher White Proportion",
+       x = "Immigration Rate",
+       y = "Proportion White",
+       subtitle = "2019",
+       caption = "Weighted by County Population")
+```
+
+```{r}
+ggplot(df_2020_combined, aes(x = avg_immi_rate, y = percent_hispanic, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Immigration Rate is Lower in Counties with Higher Hispanic Proportion",
+       x = "Immigration Rate",
+       y = "Proportion Hispanic",
+       subtitle = "2019",
+       caption = "Weighted by County Population")
+```
+
+```{r}
+ggplot(df_2020_combined_emi, aes(x = avg_emi_rate, y = percent_white, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Emigration Rate is Higher in Counties with Higher White Proportion",
+       x = "Emigration Rate",
+       y = "Proportion White",
+       subtitle = "2019",
+       caption = "Weighted by County Population")
+```
+
+```{r}
+ggplot(df_2020_combined_emi, aes(x = avg_emi_rate, y = percent_hispanic, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Emigration Rate is Lower in Counties with Higher Hispanic Proportion",
+       x = "Emigration Rate",
+       y = "Proportion Hispanic",
+       subtitle = "2019",
+       caption = "Weighted by County Population")
+```
+
+```{r}
+ggplot(df_2020_combined, aes(x = avg_immi_rate, y = percent_bachelors, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Immigration Rate is Higher in Counties with Higher Bachelor's Proportion",
+       x = "Immigration Rate",
+       y = "Percent Bachelor's Degree",
+       subtitle = "2019",
+       caption = "Weighted by County Population")
+```
+
+```{r}
+ggplot(df_2020_combined_emi, aes(x = avg_emi_rate, y = percent_bachelors, size = total_pop)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = "lm", aes(weight = total_pop), show.legend = FALSE) +
+  labs(title = "Emigration Rate is Higher in Counties with Higher Bachelor's Proportion",
+       x = "Emigration Rate",
+       y = "Percent Bachelor's Degree",
+       subtitle = "2019",
+       caption = "Weighted by County Population")
+```
+
+
